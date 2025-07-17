@@ -69,6 +69,7 @@ class KeyboardController:
                 self.velocity = 0
             time.sleep(0.05)
 
+
 class SteeringMotorController:
     def __init__(self, port_name='/dev/ttyACM0', baud_rate=1000000, steering_ids=(0, 1)):
         self.port = PortHandler(port_name)
@@ -87,40 +88,79 @@ class SteeringMotorController:
         self.ROBOT_LENGTH = 450
         self.front_wheelbase = self.ROBOT_LENGTH / 2
         self.rear_wheelbase = self.ROBOT_LENGTH / 2
+        
+        # 아크만 기하학을 위한 속도와 조향 각도 저장
+        self.velocity = 0
+        self.steering = 0
 
     def steering_to_position(self, angle):
         return self.INIT_POSITION + int((angle / 45.0) * 512)
 
-    def update_steering(self, steering_angle):
-        if steering_angle == 0:
-            angles = [0, 0]
-        else:
-            direction = 1 if steering_angle > 0 else -1
-            input_angle = abs(steering_angle)
-            inner_angle_rad = math.radians(input_angle)
+    def compute_ackermann(self):
+        vel = self.velocity
+        steer = self.steering
 
+        if steer == 0:                                              # 만약에 회전하지 않고 직진과 후진만 하는 상황이라면
+            wheel_speeds = [vel, vel, vel, vel]                     # 바퀴 속도 리스트 생성: 모든 4개 바퀴(앞왼쪽 FL, 앞오른쪽 FR, 뒤왼쪽 RL, 뒤오른쪽 RR)에 vel 값을 동일하게 설정
+            steering_angles = [0.0, 0.0]                            # 조향 각도 리스트 생성: 앞바퀴 2개(왼쪽 left, 오른쪽 right)에 0.0을 설정
+        else:                                                       # 회전하는 상황이면 즉 선회상태이면
+            direction = 1 if steer > 0 else -1                      # steer가 양수이면 direction=1(오른쪽 선회), 음수이면 -1(왼쪽 선회)으로 설정
+            
+            # 회전반경 계산 코드
+            input_angle = abs(steer)                                # 입력 각도의 절대값을 input_angle에 저장
+            inner_angle_rad = math.radians(input_angle)             # input_angle을 라디안 단위로 변환
             R = (self.ROBOT_LENGTH / math.tan(inner_angle_rad)) + (self.ROBOT_WIDTH / 2)                       # 선회 반경 R 계산 (아크만 기하학 공식.)
             outer_front_angle = math.degrees(math.atan(self.ROBOT_LENGTH / (R + self.ROBOT_WIDTH / 2)))      # 외측 앞바퀴 각도 계산: atan 함수로 각도를 구하고 degrees로 변환
             
-            if direction > 0:
-                front_left = input_angle
-                front_right = outer_front_angle
-            else:
-                front_right = input_angle
-                front_left = outer_front_angle
-                front_right = -front_right
-                front_left = -front_left
-            angles = [front_right, front_left]
-        target_positions = [self.steering_to_position(a) for a in angles]
+            # 속도 계산 코드 각속도를 이용함
+            w = (vel/R)
+            r_inner_front = math.sqrt((R - (self.ROBOT_WIDTH / 2))**2 + (self.ROBOT_LENGTH)**2)
+            r_outer_front = math.sqrt((R + (self.ROBOT_WIDTH / 2))**2 + (self.ROBOT_LENGTH)**2)
+            r_inner_back = (R - (self.ROBOT_WIDTH / 2))
+            r_outer_back = (R + (self.ROBOT_WIDTH / 2))
+            
+            v_inner_front = (w * r_inner_front)
+            v_outer_front = (w * r_outer_front)
+            v_inner_back = (w * r_inner_back)
+            v_outer_back = (w * r_outer_back)
+
+            if direction > 0:                                       # direction이 양수(오른쪽 선회)이면 아래 코드를 실행
+                front_right = input_angle                           # 오른쪽 앞바퀴 각도를 input_angle(내측 각도)로 설정
+                front_left = outer_front_angle                      # 왼쪽 앞바퀴 각도를 outer_front_angle(외측 각도)로 설정
+            else:                                                   # direction이 음수(왼쪽 선회)이면 아래 코드를 실행
+                front_left = input_angle                            # 왼쪽 앞바퀴 각도를 input_angle(내측 각도)로 설정
+                front_right = outer_front_angle                     # 오른쪽 앞바퀴 각도를 outer_front_angle(외측 각도)로 설정
+                front_left = -front_left                            # 왼쪽 각도를 음수로 변환합니다. (왼쪽 선회 방향 반영.)
+                front_right = -front_right                          # 오른쪽 각도를 음수로 변환합니다. (왼쪽 선회 방향 반영.)
+            steering_angles = [front_left, front_right]             # 조향 각도 리스트 생성: [왼쪽, 오른쪽] 순서로 저장
+
+            if direction > 0:                                                               # 조건 검사: 오른쪽 선회이면 아래 코드를 실행
+                wheel_speeds = [v_inner_front, v_outer_front, v_inner_back, v_outer_back]   # 바퀴 속도 리스트: [내측, 외측, 내측, 외측] 순서로 설정 (FL 내측, FR 외측 등).
+            else:                                                                           # 왼쪽 선회이면 아래 코드를 실행
+                wheel_speeds = [v_outer_front, v_inner_front, v_outer_back, v_inner_back]   # 바퀴 속도 리스트: [외측, 내측, 외측, 내측] 순서로 설정 (FL 외측, FR 내측 등).
+        return wheel_speeds, steering_angles
+
+    def update_steering(self, steering_angle, velocity):
+        # 속도와 조향 각도 업데이트
+        self.steering = steering_angle
+        self.velocity = velocity
+        
+        # 아크만 기하학 계산
+        wheel_speeds, steering_angles = self.compute_ackermann()
+        
+        # 조향 모터 제어 (기존 방식과 동일하지만 steering_angles 사용)
+        target_positions = [self.steering_to_position(a) for a in steering_angles]
         for motor_id, pos in zip(self.steering_ids, target_positions):
             self.packet.write4ByteTxRx(self.port, motor_id, 116, pos)
-        return angles
+        
+        return wheel_speeds, steering_angles
 
     def shutdown(self):
         for _id in self.steering_ids:
             self.packet.write4ByteTxRx(self.port, _id, 116, self.INIT_POSITION)
             self.packet.write1ByteTxRx(self.port, _id, 64, 0)
         self.port.closePort()
+
 
 class InWheelMotorController:
     def __init__(self, port_list=("/dev/ttyACM1", "/dev/ttyACM2", "/dev/ttyACM3", "/dev/ttyACM4"),
@@ -213,7 +253,21 @@ class InWheelMotorController:
         data = data_temp + bytes([crc])
         self.send_data(ser, data)
 
+    def set_velocity_individual(self, wheel_speeds):
+        """
+        각 바퀴에 개별 속도를 설정하는 메서드
+        wheel_speeds: [FL, FR, RL, RR] 순서의 속도 리스트
+        """
+        for i, (ser, motor_id) in enumerate(zip(self.serial_connections, self.velocity_ids)):
+            # 바퀴 순서에 따른 속도 설정
+            target_velocity = wheel_speeds[i]
+            # 모터 방향 보정 (왼쪽 바퀴는 반대 방향)
+            if i % 2 == 0:  # FL, RL (왼쪽 바퀴, 인덱스 0, 2)
+                target_velocity = -target_velocity
+            self.set_velocity(ser, motor_id, int(target_velocity))
+
     def set_velocity_all(self, velocity):
+        """기존 방식 유지 (직진용)"""
         for i, (ser, motor_id) in enumerate(zip(self.serial_connections, self.velocity_ids)):
             target_velocity = velocity if i % 2 != 0 else -velocity
             self.set_velocity(ser, motor_id, target_velocity)
@@ -222,6 +276,7 @@ class InWheelMotorController:
         for ser, motor_id in zip(self.serial_connections, self.velocity_ids):
             self.brake(ser, motor_id)
             ser.close()
+
 
 class MotorControlNode(Node):
     def __init__(self):
@@ -238,17 +293,29 @@ class MotorControlNode(Node):
         self.keyboard_ctrl.process_key_event(msg.data)
 
     def control_loop(self):
-        self.inwheel_ctrl.set_velocity_all(self.keyboard_ctrl.velocity)
-        angles = self.steering_ctrl.update_steering(self.keyboard_ctrl.steering)
+        # 아크만 기하학을 적용한 속도 및 조향 제어
+        wheel_speeds, steering_angles = self.steering_ctrl.update_steering(
+            self.keyboard_ctrl.steering, 
+            self.keyboard_ctrl.velocity
+        )
+        
+        # 개별 바퀴 속도 제어
+        self.inwheel_ctrl.set_velocity_individual(wheel_speeds)
+        
+        # 상태 메시지 업데이트 (4개 바퀴 속도 포함)
         status = (f"속도: {self.keyboard_ctrl.velocity} | "
-                  f"FR: {angles[0]:.1f}°, FL: {angles[1]:.1f}°, "
-                  f"(steering: {self.keyboard_ctrl.steering}°)")
+                  f"조향: {self.keyboard_ctrl.steering}° | "
+                  f"FL: {wheel_speeds[0]:.1f}, FR: {wheel_speeds[1]:.1f}, "
+                  f"RL: {wheel_speeds[2]:.1f}, RR: {wheel_speeds[3]:.1f} | "
+                  f"조향각 - L: {steering_angles[0]:.1f}°, R: {steering_angles[1]:.1f}°")
+        
         self.publisher.publish(String(data=status))
         self.get_logger().info(status)
 
     def shutdown(self):
         self.steering_ctrl.shutdown()
         self.inwheel_ctrl.shutdown()
+
 
 def main():
     rclpy.init()
@@ -261,6 +328,7 @@ def main():
         node.shutdown()
         node.destroy_node()
         rclpy.shutdown()
+
 
 if __name__ == "__main__":
     main()
